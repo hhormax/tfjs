@@ -1,0 +1,115 @@
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>tfjs</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@2.0.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-data@2.0.0/dist/tf-data.min.js"></script>
+    <link rel="stylesheet" href="./style.css">
+</head>
+
+<body>
+    <div class="content">
+        <video autoplay playsinline muted class="camera" id="webcam" width="224" height="224"></video>
+        <h1 class="text" id="status">Loading...</h1>
+    </div>
+    
+    <script>
+        let trainingData = [];
+
+        const labels = [
+            "None",
+            "👃 Nose",
+            "👀 Eye",
+            "👂 Ear",
+        ];
+
+        function setText(text) {
+            document.getElementById("status").innerText = text;
+        }
+
+        async function predictImage() {
+            const img = await getWebcamImage();
+            let result = tf.tidy(() => {
+                const input = img.reshape([1, 224, 224, 3]);
+                return model.predict(input);
+            });
+            img.dispose();
+            let prediction = await result.data();
+            result.dispose();
+            let id = prediction.indexOf(Math.max(...prediction));
+            setText(labels[id]);
+        }
+
+        function createTransferModel(model) {
+            // Create the truncated base model (remove the "top" layers, classification + bottleneck layers)
+            const bottleneck = model.getLayer("dropout"); // This is the final layer before the conv_pred pre-trained classification layer
+            const baseModel = tf.model({
+                inputs: model.inputs,
+                outputs: bottleneck.output
+            });
+            // Freeze the convolutional base
+            for (const layer of baseModel.layers) {
+                layer.trainable = false;
+            }
+            // Add a classification head
+            const newHead = tf.sequential();
+            newHead.add(tf.layers.flatten({
+                inputShape: baseModel.outputs[0].shape.slice(1)
+            }));
+            newHead.add(tf.layers.dense({ units: 100, activation: 'relu' }));
+            newHead.add(tf.layers.dense({ units: 100, activation: 'relu' }));
+            newHead.add(tf.layers.dense({ units: 10, activation: 'relu' }));
+            newHead.add(tf.layers.dense({
+                units: labels.length,
+                kernelInitializer: 'varianceScaling',
+                useBias: false,
+                activation: 'softmax'
+            }));
+            // Build the new model
+            const newOutput = newHead.apply(baseModel.outputs[0]);
+            const newModel = tf.model({ inputs: baseModel.inputs, outputs: newOutput });
+            return newModel;
+        }
+
+        const trained_model = "./model/trained-model.json";
+        let model = null;
+
+        async function setupWebcam() {
+            return new Promise((resolve, reject) => {
+                const webcamElement = document.getElementById("webcam");
+                const navigatorAny = navigator;
+                navigator.getUserMedia = navigator.getUserMedia ||
+                    navigatorAny.webkitGetUserMedia || navigatorAny.mozGetUserMedia ||
+                    navigatorAny.msGetUserMedia;
+                if (navigator.getUserMedia) {
+                    navigator.getUserMedia({ video: true },
+                        stream => {
+                            webcamElement.srcObject = stream;
+                            webcamElement.addEventListener("loadeddata", resolve, false);
+                        },
+                        error => reject());
+                }
+                else {
+                    reject();
+                }
+            });
+        }
+
+        async function getWebcamImage() {
+            const img = (await webcam.capture()).toFloat();
+            const normalized = img.div(127).sub(1);
+            return normalized;
+        }
+
+        let webcam = null;
+
+        (async () => {
+            model = await tf.loadLayersModel(trained_model);
+            model = createTransferModel(model);
+            await setupWebcam();
+            webcam = await tf.data.webcam(document.getElementById("webcam"));
+            setInterval(predictImage, 200);
+        })();
+    </script>
+</body>
+</html>
